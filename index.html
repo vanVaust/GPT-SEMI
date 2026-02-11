@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Black Hole Accretion Disk</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: radial-gradient(circle at center, #010109 0%, #000 60%, #000 100%);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    .hud {
+      position: fixed;
+      left: 1rem;
+      bottom: 1rem;
+      color: #c9d4ff;
+      letter-spacing: 0.04em;
+      font-size: 0.78rem;
+      opacity: 0.78;
+      user-select: none;
+      pointer-events: none;
+      text-shadow: 0 0 0.5rem rgba(180, 200, 255, 0.4);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="sim"></canvas>
+  <div class="hud">Relativistic accretion disk • Doppler beaming • Gravitational lensing</div>
+  <script>
+    const canvas = document.getElementById('sim');
+    const ctx = canvas.getContext('2d');
+
+    const BH = {
+      radius: 58,
+      influence: 340,
+      diskInner: 78,
+      diskOuter: 350,
+    };
+
+    const CAMERA = {
+      // Direction from scene origin toward camera.
+      dir: normalize({ x: -0.22, y: 0.58, z: 0.78 }),
+      fov: 640,
+    };
+
+    const SIM = {
+      particleCount: 5200,
+      timeScale: 0.9,
+      c: 1.0,
+    };
+
+    let width = 1;
+    let height = 1;
+    let cx = 0;
+    let cy = 0;
+    let particles = [];
+    let stars = [];
+    let starField = null;
+
+    function normalize(v) {
+      const l = Math.hypot(v.x, v.y, v.z) || 1;
+      return { x: v.x / l, y: v.y / l, z: v.z / l };
+    }
+
+    function rand(min, max) {
+      return min + Math.random() * (max - min);
+    }
+
+    function gaussian(mean = 0, stdev = 1) {
+      let u = 1 - Math.random();
+      let v = Math.random();
+      return mean + stdev * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    }
+
+    function setup() {
+      resize();
+      buildParticles();
+      buildStars();
+      requestAnimationFrame(frame);
+    }
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      width = Math.floor(window.innerWidth * dpr);
+      height = Math.floor(window.innerHeight * dpr);
+      canvas.width = width;
+      canvas.height = height;
+      canvas.style.width = `${window.innerWidth}px`;
+      canvas.style.height = `${window.innerHeight}px`;
+      cx = width * 0.5;
+      cy = height * 0.5;
+      CAMERA.fov = Math.min(width, height) * 0.86;
+      starField = null;
+      renderStarField();
+    }
+
+    function buildParticles() {
+      particles = [];
+      for (let i = 0; i < SIM.particleCount; i++) {
+        const bias = Math.pow(Math.random(), 2.1);
+        const r = BH.diskInner + (BH.diskOuter - BH.diskInner) * bias;
+        const a = rand(0, Math.PI * 2);
+        const y = gaussian(0, 5 + (r - BH.diskInner) * 0.03);
+
+        // Quasi-Keplerian with relativistic boost near ISCO.
+        const baseSpeed = 0.22 + 0.55 * Math.exp(-(r - BH.diskInner) / 65);
+        const speed = Math.min(0.88, baseSpeed + Math.random() * 0.04);
+
+        particles.push({
+          r,
+          a,
+          y,
+          speed,
+          jitter: rand(0.001, 0.008),
+          drift: rand(-0.0009, 0.0009),
+          size: rand(0.8, 1.8),
+        });
+      }
+    }
+
+    function buildStars() {
+      stars = [];
+      const starCount = 2100;
+      for (let i = 0; i < starCount; i++) {
+        stars.push({
+          x: rand(0, width),
+          y: rand(0, height),
+          b: rand(0.15, 1),
+          s: rand(0.4, 1.7),
+          tw: rand(0.5, 1.5),
+        });
+      }
+      renderStarField();
+    }
+
+    function renderStarField() {
+      if (!width || !height) return;
+      starField = typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(width, height)
+        : Object.assign(document.createElement('canvas'), { width, height });
+      if (!(starField instanceof OffscreenCanvas)) {
+        starField.width = width;
+        starField.height = height;
+      }
+      const sctx = starField.getContext('2d');
+      sctx.fillStyle = '#000';
+      sctx.fillRect(0, 0, width, height);
+
+      for (const s of stars) {
+        const dx = s.x - cx;
+        const dy = s.y - cy;
+        const r = Math.hypot(dx, dy) + 1;
+        const dirX = dx / r;
+        const dirY = dy / r;
+
+        // Gravitational lensing approximation:
+        // radial magnification + tangential shear around the well.
+        const radialPull = Math.min(180, (BH.influence * BH.influence) / (r + 24));
+        const twist = Math.min(0.9, (BH.influence * 0.85) / (r * 5 + 1));
+
+        const tangentialX = -dirY;
+        const tangentialY = dirX;
+
+        const warpedX = s.x + dirX * radialPull * 0.28 + tangentialX * radialPull * twist * s.tw;
+        const warpedY = s.y + dirY * radialPull * 0.28 + tangentialY * radialPull * twist * s.tw;
+
+        if (warpedX < -10 || warpedX > width + 10 || warpedY < -10 || warpedY > height + 10) {
+          continue;
+        }
+
+        const distToHole = Math.hypot(warpedX - cx, warpedY - cy);
+        const fade = Math.max(0, Math.min(1, (distToHole - BH.radius * 0.6) / (BH.radius * 1.1)));
+        const glow = s.b * fade;
+
+        sctx.fillStyle = `rgba(${120 + glow * 115}, ${145 + glow * 110}, ${185 + glow * 70}, ${0.18 + glow * 0.72})`;
+        sctx.beginPath();
+        sctx.arc(warpedX, warpedY, s.s * (0.4 + glow * 0.9), 0, Math.PI * 2);
+        sctx.fill();
+      }
+
+      const vignette = sctx.createRadialGradient(cx, cy, BH.radius * 0.5, cx, cy, Math.max(width, height) * 0.75);
+      vignette.addColorStop(0, 'rgba(8, 10, 18, 0.04)');
+      vignette.addColorStop(1, 'rgba(0, 0, 0, 0.5)');
+      sctx.fillStyle = vignette;
+      sctx.fillRect(0, 0, width, height);
+    }
+
+    function project(x, y, z) {
+      // Mild camera tilt by rotating around X axis.
+      const tilt = -0.92;
+      const ct = Math.cos(tilt);
+      const st = Math.sin(tilt);
+      const ry = y * ct - z * st;
+      const rz = y * st + z * ct;
+
+      const depth = rz + 720;
+      const scale = CAMERA.fov / Math.max(120, depth);
+
+      return {
+        x: cx + x * scale,
+        y: cy + ry * scale,
+        scale,
+        depth,
+      };
+    }
+
+    function drawAccretionDisk(t) {
+      ctx.globalCompositeOperation = 'lighter';
+
+      for (const p of particles) {
+        // Orbital angular velocity falls with radius.
+        const omega = (p.speed * SIM.timeScale) / (p.r * 0.065);
+        p.a += omega;
+
+        // Inward drift and turbulence (spaghettification into hotter streams).
+        p.r -= 0.02 + (BH.diskOuter - p.r) * 0.00005 + p.drift;
+        p.y += Math.sin(t * 0.0008 + p.a * 1.7) * p.jitter;
+
+        if (p.r < BH.diskInner - 6 || p.r > BH.diskOuter + 10) {
+          p.r = BH.diskOuter - rand(0, 35);
+          p.y = gaussian(0, 12);
+        }
+
+        const cosA = Math.cos(p.a);
+        const sinA = Math.sin(p.a);
+        const x = p.r * cosA;
+        const z = p.r * sinA;
+
+        // Tangential velocity in disk plane.
+        const vx = -sinA * p.speed;
+        const vz = cosA * p.speed;
+        const vy = p.jitter * Math.cos(t * 0.001 + p.a);
+
+        // Doppler beaming: toward camera => blue/bright, away => red/dim.
+        const toward = vx * CAMERA.dir.x + vy * CAMERA.dir.y + vz * CAMERA.dir.z;
+        const beta = Math.max(-0.92, Math.min(0.92, toward / SIM.c));
+        const gamma = 1 / Math.sqrt(1 - beta * beta);
+        const beaming = Math.pow(gamma * (1 + beta), 2.4);
+        const towardNorm = (beta + 0.92) / 1.84;
+
+        const proj = project(x, p.y, z);
+        if (proj.depth < 90 || proj.x < -40 || proj.x > width + 40 || proj.y < -40 || proj.y > height + 40) {
+          continue;
+        }
+
+        const innerHeat = 1 - Math.min(1, (p.r - BH.diskInner) / (BH.diskOuter - BH.diskInner));
+        const stretch = (2 + innerHeat * 9) * (0.5 + beaming * 0.8) * proj.scale;
+
+        const rCol = Math.floor(210 + 40 * (1 - towardNorm));
+        const gCol = Math.floor(65 + 150 * towardNorm + innerHeat * 35);
+        const bCol = Math.floor(55 + 220 * towardNorm + beaming * 35);
+        const alpha = Math.max(0.04, Math.min(0.95, 0.08 + innerHeat * 0.32 + beaming * 0.2));
+
+        ctx.strokeStyle = `rgba(${rCol}, ${gCol}, ${bCol}, ${alpha})`;
+        ctx.lineWidth = (p.size + innerHeat * 1.1) * proj.scale;
+        ctx.beginPath();
+        ctx.moveTo(proj.x - vx * stretch, proj.y - vz * stretch * 0.35);
+        ctx.lineTo(proj.x + vx * stretch, proj.y + vz * stretch * 0.35);
+        ctx.stroke();
+      }
+
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    function drawBlackHole() {
+      const glow = ctx.createRadialGradient(cx, cy, BH.radius * 0.4, cx, cy, BH.radius * 2.9);
+      glow.addColorStop(0, 'rgba(0, 0, 0, 0.95)');
+      glow.addColorStop(0.45, 'rgba(0, 0, 0, 0.9)');
+      glow.addColorStop(0.75, 'rgba(30, 40, 110, 0.22)');
+      glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(cx, cy, BH.radius * 2.9, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(cx, cy, BH.radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function frame(t) {
+      ctx.clearRect(0, 0, width, height);
+      if (starField) {
+        ctx.drawImage(starField, 0, 0);
+      }
+
+      drawAccretionDisk(t);
+      drawBlackHole();
+      requestAnimationFrame(frame);
+    }
+
+    window.addEventListener('resize', () => {
+      resize();
+      buildStars();
+    });
+
+    setup();
+  </script>
+</body>
+</html>
